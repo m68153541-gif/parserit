@@ -12,30 +12,34 @@ from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, CallbackQu
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
 from telethon import TelegramClient
+from telethon.sessions import StringSession
 from telethon.tl.functions.payments import GetSavedStarGiftsRequest
 from telethon.tl.types import InputPeerSelf
 
 # ==========================================
-# НАСТРОЙКИ (ДЛЯ ТЕСТА ВСТАВЛЕНЫ СЮДА)
+# НАСТРОЙКИ (ОБНОВЛЕНЫ НА ВТОРОЙ АККАУНТ)
 # ==========================================
-BOT_TOKEN = "9217167507:AAEzoKBaNkroGJ5ISNOWIBGhwWPR5uTgP-4"
-API_ID = 36414137
-API_HASH = "ddf0ae277653cf0b5e5da58152138082"
-ADMIN_ID = 8513244807  # Ваш ID для админки
-SESSION_NAME = "gift_parser_session"
+BOT_TOKEN = "9217167507:AAEzoKBaNkroGJ5ISNOWIBGhwWPR5uTgP-4" # Вставь сюда токен от @BotFather
+API_ID = 32969479
+API_HASH = "817c78ce17662923f8167067b4551602"
+ADMIN_ID = 8513244807
+
+# Сессия будет браться из переменной окружения на Render
+# Пока для локального теста можно оставить пустой строкой, но мы сделаем через generate_session.py
+SESSION_STRING = os.environ.get("TG_SESSION_STRING", "")
 
 logging.basicConfig(level=logging.INFO)
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 
-# Клиент Telethon для парсинга (нужен для работы от имени аккаунта)
-client = TelegramClient(SESSION_NAME, API_ID, API_HASH)
+# Клиент Telethon с использованием StringSession (для Render)
+client = TelegramClient(StringSession(SESSION_STRING), API_ID, API_HASH)
 
 # Хранилище сессий пользователей (для диалога)
 user_states = {}
 
 # ==========================================
-# ВЕБ-СЕРВЕР ДЛЯ RENDER (чтобы не засыпал)
+# ВЕБ-СЕРВЕР ДЛЯ RENDER
 # ==========================================
 def run_dummy_server():
     port = int(os.environ.get("PORT", 8080))
@@ -49,9 +53,7 @@ def run_dummy_server():
 async def get_gifts_from_user(peer_id):
     """Получает список подарков у пользователя по его ID"""
     try:
-        # Получаем сущность пользователя по ID
         user = await client.get_entity(peer_id)
-        # Запрашиваем сохраненные подарки
         result = await client(GetSavedStarGiftsRequest(
             peer=user,
             offset=0,
@@ -65,21 +67,17 @@ async def get_gifts_from_user(peer_id):
 async def find_gift_owners(gift_name: str, limit: int = 150):
     """
     Ищет владельцев подарка.
-    В реальности здесь должен быть сложный парсинг,
-    но для теста мы просто возвращаем случайных пользователей из ваших чатов.
+    Для теста возвращает случайных пользователей из ваших диалогов.
     """
     owners = []
     try:
-        # Получаем список ваших диалогов (для теста)
         dialogs = await client.get_dialogs(limit=50)
         for dialog in dialogs:
             if len(owners) >= limit:
                 break
             if dialog.is_user:
-                # Проверяем, есть ли у него подарки
                 gifts = await get_gifts_from_user(dialog.id)
                 for gift in gifts:
-                    # В Telethon название подарка лежит в gift.gift.title
                     if gift_name.lower() in gift.gift.title.lower():
                         owners.append({
                             'id': dialog.id,
@@ -91,7 +89,6 @@ async def find_gift_owners(gift_name: str, limit: int = 150):
     except Exception as e:
         logging.error(f"Error in find_gift_owners: {e}")
     
-    # Перемешиваем и возвращаем случайные 150
     random.shuffle(owners)
     return owners[:limit]
 
@@ -126,7 +123,6 @@ async def process_on_sale(callback: CallbackQuery):
 @dp.callback_query(F.data == "not_on_sale")
 async def process_not_on_sale(callback: CallbackQuery):
     builder = InlineKeyboardBuilder()
-    # Примеры популярных подарков (в реальности их нужно брать из API)
     builder.button(text="Durov's Cap", callback_data="gift_Durov Cap")
     builder.button(text="Heart", callback_data="gift_Heart")
     builder.button(text="⬅️ Назад", callback_data="back")
@@ -148,7 +144,6 @@ async def process_gift_selection(callback: CallbackQuery):
         await callback.message.edit_text(f"❌ Владельцы подарка «{gift_name}» не найдены.")
         return
     
-    # Формируем список
     text = f"🔍 Найдено {len(owners)} владельцев подарка «{gift_name}»:\n\n"
     for i, owner in enumerate(owners[:150], 1):
         text += f"{i}. @{owner['username']} — {owner['gift_title']} — [ссылка]({owner['gift_link']})\n"
@@ -177,16 +172,13 @@ async def process_back(callback: CallbackQuery):
 # ЗАПУСК
 # ==========================================
 async def main():
-    # Запускаем веб-сервер в фоне (для Render)
     t = Thread(target=run_dummy_server)
     t.daemon = True
     t.start()
     
-    # Запускаем Telethon клиент
     await client.start()
     logging.info("Telethon client started")
     
-    # Запускаем бота
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
