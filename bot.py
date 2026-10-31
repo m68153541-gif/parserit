@@ -2,7 +2,6 @@ import asyncio
 import logging
 import os
 import random
-from datetime import datetime
 from threading import Thread
 from http.server import SimpleHTTPRequestHandler, HTTPServer
 
@@ -14,29 +13,36 @@ from aiogram.utils.keyboard import InlineKeyboardBuilder
 from telethon import TelegramClient
 from telethon.sessions import StringSession
 from telethon.tl.functions.payments import GetSavedStarGiftsRequest
-from telethon.tl.types import InputPeerSelf
 
 # ==========================================
-# НАСТРОЙКИ (ОБНОВЛЕНЫ НА ВТОРОЙ АККАУНТ)
+# НАСТРОЙКИ (НЕ МЕНЯЙ ЗДЕСЬ НИЧЕГО)
 # ==========================================
-BOT_TOKEN = "9217167507:AAEzoKBaNkroGJ5ISNOWIBGhwWPR5uTgP-4" # Вставь сюда токен от @BotFather
+BOT_TOKEN = "9217167507:AAEzoKBaNkroGJ5ISNOWIBGhwWPR5uTgP-4"
 API_ID = 32969479
 API_HASH = "817c78ce17662923f8167067b4551602"
 ADMIN_ID = 8513244807
 
-# Сессия будет браться из переменной окружения на Render
-# Пока для локального теста можно оставить пустой строкой, но мы сделаем через generate_session.py
 SESSION_STRING = os.environ.get("TG_SESSION_STRING", "")
 
 logging.basicConfig(level=logging.INFO)
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 
-# Клиент Telethon с использованием StringSession (для Render)
 client = TelegramClient(StringSession(SESSION_STRING), API_ID, API_HASH)
 
-# Хранилище сессий пользователей (для диалога)
-user_states = {}
+# Хранилище для пагинации: user_id -> {'gift': name, 'owners': [...], 'page': 0}
+user_pagination = {}
+
+# Список популярных подарков (для меню выбора)
+POPULAR_GIFTS = [
+    "Durov's Cap", "Heart", "Bear", "Bunny", "Cake", "Cup", "Diamond",
+    "Flower", "Gift Box", "Horse", "Ice Cream", "Moon", "Panda", "Rose",
+    "Star", "Teddy Bear", "Unicorn", "Wine", "Crown", "Ring", "Rocket",
+    "Balloon", "Chocolate", "Clover", "Crystal", "Dice", "Duck", "Elephant",
+    "Fire", "Fish", "Ghost", "Guitar", "Hammer", "Joker", "King", "Lion",
+    "Mask", "Medal", "Microphone", "Monkey", "Owl", "Penguin", "Pizza",
+    "Rainbow", "Sword", "Tiger", "Trophy", "Watermelon", "Whale", "Wizard"
+]
 
 # ==========================================
 # ВЕБ-СЕРВЕР ДЛЯ RENDER
@@ -48,14 +54,13 @@ def run_dummy_server():
     server.serve_forever()
 
 # ==========================================
-# ЛОГИКА ПАРСИНГА (ЧЕРЕЗ TELETHON)
+# ЛОГИКА ПАРСИНГА
 # ==========================================
 async def get_gifts_from_user(peer_id):
-    """Получает список подарков у пользователя по его ID"""
     try:
-        user = await client.get_entity(peer_id)
+        input_peer = await client.get_input_entity(peer_id)
         result = await client(GetSavedStarGiftsRequest(
-            peer=user,
+            peer=input_peer,
             offset=0,
             limit=100
         ))
@@ -65,13 +70,10 @@ async def get_gifts_from_user(peer_id):
         return []
 
 async def find_gift_owners(gift_name: str, limit: int = 150):
-    """
-    Ищет владельцев подарка.
-    Для теста возвращает случайных пользователей из ваших диалогов.
-    """
     owners = []
     try:
-        dialogs = await client.get_dialogs(limit=50)
+        # Для теста берем диалоги. В реальности нужно брать участников чатов.
+        dialogs = await client.get_dialogs(limit=100)
         for dialog in dialogs:
             if len(owners) >= limit:
                 break
@@ -91,6 +93,29 @@ async def find_gift_owners(gift_name: str, limit: int = 150):
     
     random.shuffle(owners)
     return owners[:limit]
+
+# ==========================================
+# ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ДЛЯ ПАГИНАЦИИ
+# ==========================================
+def get_owners_page_keyboard(user_id: int, page: int, total_pages: int):
+    builder = InlineKeyboardBuilder()
+    if page > 0:
+        builder.button(text="⬅️ Назад", callback_data=f"page_{user_id}_{page-1}")
+    if page < total_pages - 1:
+        builder.button(text="Вперед ➡️", callback_data=f"page_{user_id}_{page+1}")
+    builder.button(text="🏠 В меню", callback_data="back")
+    builder.adjust(2, 1)
+    return builder.as_markup()
+
+def format_owners_page(owners: list, page: int, per_page: int = 10):
+    start = page * per_page
+    end = start + per_page
+    page_owners = owners[start:end]
+    
+    text = f"🔍 Владельцы подарка «{owners[0]['gift_title']}» (стр. {page+1}):\n\n"
+    for i, owner in enumerate(page_owners, start=start+1):
+        text += f"{i}. @{owner['username']} — [ссылка]({owner['gift_link']})\n"
+    return text
 
 # ==========================================
 # ОБРАБОТЧИКИ БОТА
@@ -123,12 +148,38 @@ async def process_on_sale(callback: CallbackQuery):
 @dp.callback_query(F.data == "not_on_sale")
 async def process_not_on_sale(callback: CallbackQuery):
     builder = InlineKeyboardBuilder()
-    builder.button(text="Durov's Cap", callback_data="gift_Durov Cap")
-    builder.button(text="Heart", callback_data="gift_Heart")
+    # Показываем по 10 подарков на страницу
+    for gift in POPULAR_GIFTS[:10]:
+        builder.button(text=gift, callback_data=f"gift_{gift}")
+    builder.button(text="Ещё ➡️", callback_data="gifts_page_1")
     builder.button(text="⬅️ Назад", callback_data="back")
-    builder.adjust(1)
+    builder.adjust(2, 2, 2, 2, 2, 1, 1)
     await callback.message.edit_text(
-        "Выберите подарок:",
+        "Выберите подарок (стр. 1):",
+        reply_markup=builder.as_markup()
+    )
+    await callback.answer()
+
+@dp.callback_query(F.data.startswith("gifts_page_"))
+async def process_gifts_page(callback: CallbackQuery):
+    page = int(callback.data.split("_")[2])
+    start = page * 10
+    end = start + 10
+    page_gifts = POPULAR_GIFTS[start:end]
+    
+    builder = InlineKeyboardBuilder()
+    for gift in page_gifts:
+        builder.button(text=gift, callback_data=f"gift_{gift}")
+    
+    if page > 0:
+        builder.button(text="⬅️ Назад", callback_data=f"gifts_page_{page-1}")
+    if end < len(POPULAR_GIFTS):
+        builder.button(text="Ещё ➡️", callback_data=f"gifts_page_{page+1}")
+    builder.button(text="🏠 В меню", callback_data="back")
+    
+    builder.adjust(2, 2, 2, 2, 2, 1, 1, 1)
+    await callback.message.edit_text(
+        f"Выберите подарок (стр. {page+1}):",
         reply_markup=builder.as_markup()
     )
     await callback.answer()
@@ -144,16 +195,37 @@ async def process_gift_selection(callback: CallbackQuery):
         await callback.message.edit_text(f"❌ Владельцы подарка «{gift_name}» не найдены.")
         return
     
-    text = f"🔍 Найдено {len(owners)} владельцев подарка «{gift_name}»:\n\n"
-    for i, owner in enumerate(owners[:150], 1):
-        text += f"{i}. @{owner['username']} — {owner['gift_title']} — [ссылка]({owner['gift_link']})\n"
-        if i % 10 == 0:
-            text += "\n"
-            await callback.message.answer(text)
-            text = ""
+    # Сохраняем для пагинации
+    user_pagination[callback.from_user.id] = {
+        'gift': gift_name,
+        'owners': owners,
+        'page': 0
+    }
     
-    if text:
-        await callback.message.answer(text)
+    total_pages = (len(owners) + 9) // 10
+    text = format_owners_page(owners, 0)
+    keyboard = get_owners_page_keyboard(callback.from_user.id, 0, total_pages)
+    
+    await callback.message.edit_text(text, reply_markup=keyboard, parse_mode="Markdown")
+    await callback.answer()
+
+@dp.callback_query(F.data.startswith("page_"))
+async def process_page(callback: CallbackQuery):
+    parts = callback.data.split("_")
+    user_id = int(parts[1])
+    page = int(parts[2])
+    
+    if user_id != callback.from_user.id or user_id not in user_pagination:
+        await callback.answer("Ошибка: данные устарели. Начните заново.")
+        return
+    
+    data = user_pagination[user_id]
+    total_pages = (len(data['owners']) + 9) // 10
+    
+    text = format_owners_page(data['owners'], page)
+    keyboard = get_owners_page_keyboard(user_id, page, total_pages)
+    
+    await callback.message.edit_text(text, reply_markup=keyboard, parse_mode="Markdown")
     await callback.answer()
 
 @dp.callback_query(F.data == "back")
