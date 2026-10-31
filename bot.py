@@ -13,9 +13,11 @@ from aiogram.utils.keyboard import InlineKeyboardBuilder
 from telethon import TelegramClient
 from telethon.sessions import StringSession
 from telethon.tl.functions.payments import GetSavedStarGiftsRequest
+from telethon.tl.functions.channels import GetParticipantsRequest
+from telethon.tl.types import ChannelParticipantsSearch
 
 # ==========================================
-# НАСТРОЙКИ (НЕ МЕНЯЙ ЗДЕСЬ НИЧЕГО)
+# НАСТРОЙКИ
 # ==========================================
 BOT_TOKEN = "9217167507:AAEzoKBaNkroGJ5ISNOWIBGhwWPR5uTgP-4"
 API_ID = 32969479
@@ -30,10 +32,18 @@ dp = Dispatcher()
 
 client = TelegramClient(StringSession(SESSION_STRING), API_ID, API_HASH)
 
-# Хранилище для пагинации: user_id -> {'gift': name, 'owners': [...], 'page': 0}
+# Хранилище для пагинации
 user_pagination = {}
 
-# Список популярных подарков (для меню выбора)
+# СПИСОК ПУБЛИЧНЫХ ЧАТОВ ДЛЯ СКАНИРОВАНИЯ (ДОБАВЛЯЙТЕ СВОИ)
+# Это могут быть чаты NFT-трейдеров, коллекционеров и т.д.
+PUBLIC_CHATS = [
+    "nft_traders_chat",  # Пример (замените на реальные)
+    "gifts_market_chat",
+    "telegram_gifts_chat",
+]
+
+# Список популярных подарков
 POPULAR_GIFTS = [
     "Durov's Cap", "Heart", "Bear", "Bunny", "Cake", "Cup", "Diamond",
     "Flower", "Gift Box", "Horse", "Ice Cream", "Moon", "Panda", "Rose",
@@ -66,31 +76,53 @@ async def get_gifts_from_user(peer_id):
         ))
         return result.gifts
     except Exception as e:
-        logging.error(f"Error getting gifts for {peer_id}: {e}")
         return []
 
 async def find_gift_owners(gift_name: str, limit: int = 150):
     owners = []
-    try:
-        # Для теста берем диалоги. В реальности нужно брать участников чатов.
-        dialogs = await client.get_dialogs(limit=100)
-        for dialog in dialogs:
-            if len(owners) >= limit:
-                break
-            if dialog.is_user:
-                gifts = await get_gifts_from_user(dialog.id)
-                for gift in gifts:
-                    if gift_name.lower() in gift.gift.title.lower():
-                        owners.append({
-                            'id': dialog.id,
-                            'username': dialog.username or f"id{dialog.id}",
-                            'gift_title': gift.gift.title,
-                            'gift_link': f"tg://user?id={dialog.id}"
-                        })
-                        break
-    except Exception as e:
-        logging.error(f"Error in find_gift_owners: {e}")
+    logging.info(f"Searching for {gift_name} in public chats...")
     
+    # Собираем участников из публичных чатов
+    all_participants = []
+    for chat_username in PUBLIC_CHATS:
+        try:
+            chat = await client.get_entity(chat_username)
+            participants = await client(GetParticipantsRequest(
+                channel=chat,
+                filter=ChannelParticipantsSearch(''),
+                offset=0,
+                limit=100,  # Берем первых 100 участников
+                hash=0
+            ))
+            if participants and participants.users:
+                all_participants.extend(participants.users)
+                logging.info(f"Found {len(participants.users)} participants in {chat_username}")
+        except Exception as e:
+            logging.error(f"Error getting participants from {chat_username}: {e}")
+    
+    # Убираем дубликаты
+    unique_participants = {u.id: u for u in all_participants}.values()
+    logging.info(f"Total unique participants: {len(unique_participants)}")
+    
+    # Проверяем подарки у каждого
+    for user in unique_participants:
+        if len(owners) >= limit:
+            break
+        try:
+            gifts = await get_gifts_from_user(user.id)
+            for gift in gifts:
+                if gift_name.lower() in gift.gift.title.lower():
+                    owners.append({
+                        'id': user.id,
+                        'username': user.username or f"id{user.id}",
+                        'gift_title': gift.gift.title,
+                        'gift_link': f"tg://user?id={user.id}"
+                    })
+                    break
+        except Exception as e:
+            continue
+    
+    logging.info(f"Found {len(owners)} owners for {gift_name}")
     random.shuffle(owners)
     return owners[:limit]
 
@@ -148,7 +180,6 @@ async def process_on_sale(callback: CallbackQuery):
 @dp.callback_query(F.data == "not_on_sale")
 async def process_not_on_sale(callback: CallbackQuery):
     builder = InlineKeyboardBuilder()
-    # Показываем по 10 подарков на страницу
     for gift in POPULAR_GIFTS[:10]:
         builder.button(text=gift, callback_data=f"gift_{gift}")
     builder.button(text="Ещё ➡️", callback_data="gifts_page_1")
@@ -187,15 +218,18 @@ async def process_gifts_page(callback: CallbackQuery):
 @dp.callback_query(F.data.startswith("gift_"))
 async def process_gift_selection(callback: CallbackQuery):
     gift_name = callback.data.replace("gift_", "")
-    await callback.message.edit_text(f"⏳ Ищу владельцев подарка «{gift_name}»...")
+    await callback.message.edit_text(f"⏳ Ищу владельцев подарка «{gift_name}» в публичных чатах...\nЭто может занять до 30 секунд.")
     
     owners = await find_gift_owners(gift_name)
     
     if not owners:
-        await callback.message.edit_text(f"❌ Владельцы подарка «{gift_name}» не найдены.")
+        await callback.message.edit_text(
+            f"❌ Владельцы подарка «{gift_name}» не найдены.\n"
+            f"Возможно, в указанных чатах нет людей с этим подарком.\n"
+            f"Добавьте больше чатов в список PUBLIC_CHATS в коде."
+        )
         return
     
-    # Сохраняем для пагинации
     user_pagination[callback.from_user.id] = {
         'gift': gift_name,
         'owners': owners,
